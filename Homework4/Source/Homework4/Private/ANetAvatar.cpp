@@ -1,4 +1,5 @@
 #include "ANetAvatar.h"
+#include "ANetGameMode.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 
@@ -10,8 +11,6 @@ ANetAvatar::ANetAvatar()
 	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
 	Camera->SetupAttachment(SpringArm, USpringArmComponent::SocketName);
 
-	WalkSpeed = 300.f;
-	RunSpeed = 600.f;
 	bIsRunning = false;
 }
 
@@ -24,8 +23,32 @@ void ANetAvatar::BeginPlay()
 	bUseControllerRotationYaw = false;
 	GetCharacterMovement()->bOrientRotationToMovement = true;
 
-	WalkSpeed = GetCharacterMovement()->MaxWalkSpeed;
+	if (WalkSpeed <= 0.f)
+	{
+		WalkSpeed = GetCharacterMovement()->MaxWalkSpeed;
+	}
 	UpdateMovementSpeed();
+}
+
+void ANetAvatar::NotifyActorBeginOverlap(AActor* OtherActor)
+{
+	Super::NotifyActorBeginOverlap(OtherActor);
+
+	if (!HasAuthority())
+	{
+		return;
+	}
+
+	ANetAvatar* OtherAvatar = Cast<ANetAvatar>(OtherActor);
+	if (!OtherAvatar)
+	{
+		return;
+	}
+
+	if (ANetGameMode* GameMode = GetWorld()->GetAuthGameMode<ANetGameMode>())
+	{
+		GameMode->AvatarsOverlapped(this, OtherAvatar);
+	}
 }
 
 void ANetAvatar::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -90,6 +113,24 @@ void ANetAvatar::OnRep_IsRunning()
 void ANetAvatar::UpdateMovementSpeed()
 {
 	GetCharacterMovement()->MaxWalkSpeed = bIsRunning ? RunSpeed : WalkSpeed;
+}
+
+void ANetAvatar::Defeat_Implementation()
+{
+}
+
+void ANetAvatar::Victory_Implementation()
+{
+}
+
+void ANetAvatar::OnPlayerLost()
+{
+	Defeat();
+}
+
+void ANetAvatar::OnPlayerWon()
+{
+	Victory();
 }
 
 void ANetAvatar::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const

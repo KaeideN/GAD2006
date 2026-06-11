@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/GameInstance.h"
-#include "ANetBaseCharacter.h"
+#include "ANetPlayerState.h"
 #include "ANetGameInstance.generated.h"
 
 UCLASS()
@@ -19,4 +19,7 @@ public:
 
 	UPROPERTY(BlueprintReadWrite)
 	FSPlayerInfo PlayerInfo;
+
+	UPROPERTY(BlueprintReadWrite)
+	FString ServerAddress = TEXT("127.0.0.1");
 };

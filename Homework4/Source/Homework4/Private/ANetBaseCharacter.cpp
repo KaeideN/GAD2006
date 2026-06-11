@@ -3,6 +3,7 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "UObject/ConstructorHelpers.h"
+#include "TimerManager.h"
 
 static UDataTable* SBodyParts = nullptr;
 
@@ -21,6 +22,8 @@ ANetBaseCharacter::ANetBaseCharacter()
 {
 	PrimaryActorTick.bCanEverTick = true;
 	bReplicates = true;
+
+	FMemory::Memzero(BodyPartIndices, sizeof(BodyPartIndices));
 
 	PartFace = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("Face"));
 	PartFace->SetupAttachment(GetMesh());
@@ -64,12 +67,27 @@ void ANetBaseCharacter::BeginPlay()
 
 	if (IsLocallyControlled())
 	{
-		UNetGameInstance* Instance = Cast<UNetGameInstance>(GetWorld()->GetGameInstance());
-		if (Instance && Instance->PlayerInfo.Ready)
-		{
-			SubmitPlayerInfoToServer(Instance->PlayerInfo);
-		}
+		GetWorld()->GetTimerManager().SetTimer(
+			ClientDataCheckTimer,
+			this,
+			&ANetBaseCharacter::CheckPlayerInfo,
+			0.25f,
+			true);
 	}
+}
+
+void ANetBaseCharacter::CheckPlayerInfo()
+{
+	UNetGameInstance* Instance = Cast<UNetGameInstance>(GetGameInstance());
+	ANetPlayerState* NetPlayerState = GetPlayerState<ANetPlayerState>();
+	if (!Instance || !Instance->PlayerInfo.Ready || !NetPlayerState)
+	{
+		return;
+	}
+
+	FSPlayerInfo Info = Instance->PlayerInfo;
+	Info.CustomizationData = GetCustomizationData();
+	NetPlayerState->ServerSetPlayerInfo(Info);
 }
 
 void ANetBaseCharacter::Tick(float DeltaTime)
@@ -77,21 +95,73 @@ void ANetBaseCharacter::Tick(float DeltaTime)
 	Super::Tick(DeltaTime);
 }
 
+bool ANetBaseCharacter::GetIsFemale() const
+{
+	return BodyPartIndices[(int)EBodyPart::BP_BodyType] == 1;
+}
+
+FString ANetBaseCharacter::GetCustomizationData() const
+{
+	FString Result;
+	for (int32 i = 0; i < (int32)EBodyPart::BP_COUNT; ++i)
+	{
+		if (i > 0)
+		{
+			Result += TEXT(",");
+		}
+		Result += FString::FromInt(BodyPartIndices[i]);
+	}
+	return Result;
+}
+
+void ANetBaseCharacter::ParseCustomizationData(const FString& BodyPartData)
+{
+	TArray<FString> Parts;
+	BodyPartData.ParseIntoArray(Parts, TEXT(","), true);
+
+	for (int32 i = 0; i < Parts.Num() && i < (int32)EBodyPart::BP_COUNT; ++i)
+	{
+		BodyPartIndices[i] = FCString::Atoi(*Parts[i]);
+	}
+}
+
+void ANetBaseCharacter::ApplyPlayerInfo(const FSPlayerInfo& Info)
+{
+	ParseCustomizationData(Info.CustomizationData);
+	UpdateBodyParts();
+	OnPlayerInfoChanged();
+}
+
 void ANetBaseCharacter::ChangeBodyPart(EBodyPart index, int value, bool DirectSet)
 {
-	if (PartSelection.isFemale && index == EBodyPart::BP_Beard)
+	if (index == EBodyPart::BP_BodyType)
+	{
+		if (DirectSet)
+		{
+			BodyPartIndices[(int)index] = value;
+		}
+		else
+		{
+			BodyPartIndices[(int)index] += value;
+		}
+		BodyPartIndices[(int)index] = FMath::Clamp(BodyPartIndices[(int)index], 0, 1);
+		UpdateBodyParts();
+		return;
+	}
+
+	if (GetIsFemale() && index == EBodyPart::BP_Beard)
 	{
 		ApplyGenderCorrections();
 		return;
 	}
 
-	FSMeshAssetList* List = GetBodyPartList(index, PartSelection.isFemale);
+	FSMeshAssetList* List = GetBodyPartList(index, GetIsFemale());
 	if (!List)
 	{
 		return;
 	}
 
-	int CurrentIndex = PartSelection.Indices[(int)index];
+	int CurrentIndex = BodyPartIndices[(int)index];
 	if (DirectSet)
 	{
 		CurrentIndex = value;
@@ -111,7 +181,7 @@ void ANetBaseCharacter::ChangeBodyPart(EBodyPart index, int value, bool DirectSe
 		CurrentIndex %= Num;
 	}
 
-	PartSelection.Indices[(int)index] = CurrentIndex;
+	BodyPartIndices[(int)index] = CurrentIndex;
 
 	if (CurrentIndex < List->ListSkeletal.Num())
 	{
@@ -155,9 +225,9 @@ void ANetBaseCharacter::ChangeBodyPart(EBodyPart index, int value, bool DirectSe
 	ApplyGenderCorrections();
 }
 
-void ANetBaseCharacter::ChangeGender(bool _isFemale)
+void ANetBaseCharacter::ChangeGender(bool isFemale)
 {
-	PartSelection.isFemale = _isFemale;
+	BodyPartIndices[(int)EBodyPart::BP_BodyType] = isFemale ? 1 : 0;
 	UpdateBodyParts();
 }
 
@@ -175,7 +245,7 @@ void ANetBaseCharacter::UpdateBodyParts()
 
 void ANetBaseCharacter::ApplyGenderCorrections()
 {
-	if (PartSelection.isFemale)
+	if (GetIsFemale())
 	{
 		PartBeard->SetStaticMesh(nullptr);
 		PartBeard->SetVisibility(false);
@@ -188,7 +258,18 @@ void ANetBaseCharacter::ApplyGenderCorrections()
 
 FSMeshAssetList* ANetBaseCharacter::GetBodyPartList(EBodyPart part, bool isFemale)
 {
-	const FString Name = FString::Printf(TEXT("%s%s"), isFemale ? TEXT("Female") : TEXT("Male"), *BodyPartNames[(int)part]);
+	if (part == EBodyPart::BP_BodyType)
+	{
+		return nullptr;
+	}
+
+	const int32 NameIndex = (int32)part - 1;
+	if (!BodyPartNames.IsValidIndex(NameIndex))
+	{
+		return nullptr;
+	}
+
+	const FString Name = FString::Printf(TEXT("%s%s"), isFemale ? TEXT("Female") : TEXT("Male"), *BodyPartNames[NameIndex]);
 	return SBodyParts ? SBodyParts->FindRow<FSMeshAssetList>(*Name, nullptr) : nullptr;
 }
 
@@ -196,25 +277,4 @@ void ANetBaseCharacter::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
 	UpdateBodyParts();
-}
-
-void ANetBaseCharacter::OnRep_PlayerInfoChanged()
-{
-	UpdateBodyParts();
-}
-
-void ANetBaseCharacter::SubmitPlayerInfoToServer_Implementation(FSPlayerInfo Info)
-{
-	PartSelection = Info.BodyParts;
-
-	if (HasAuthority())
-	{
-		OnRep_PlayerInfoChanged();
-	}
-}
-
-void ANetBaseCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
-{
-	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
-	DOREPLIFETIME(ANetBaseCharacter, PartSelection);
 }
